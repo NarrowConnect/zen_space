@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -10,4 +10,7 @@ COPY . .
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["node", "server.js"]
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
+
+CMD ["node", "local-server.js"]
