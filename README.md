@@ -22,9 +22,12 @@ na Vercel, cadastre em *Settings → Environment Variables*.
 | Variável | Obrigatória | Para quê |
 | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | para o login | ID do cliente OAuth do Google |
+| `SPOTIFY_CLIENT_ID` | não | Client ID do app no Spotify (sem ele usa o padrão do código) |
 | `SESSION_SECRET` | em produção | Assina o cookie de sessão (`openssl rand -hex 32`) |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | recomendado na Vercel | SQLite persistente |
 | `SQLITE_PATH`, `PORT` | não | Só local/Docker |
+
+Nenhum *client secret* é necessário: o Google é validado com as chaves públicas do Google e o Spotify usa PKCE.
 
 ## Login com Google
 
@@ -50,6 +53,22 @@ Para testar localmente, acrescente `http://localhost:8080` e `http://localhost:8
    (ex.: `https://seu-app.vercel.app/`) em *Redirect URIs* no painel do Spotify Developer.
 
 Verifique o estado do banco em `/api/health`.
+
+## Spotify
+
+- Login PKCE (sem client secret), com renovação automática do token (inclusive entre abas) e verificação `state`.
+- Toca no navegador (Spotify Premium, desktop/Android) ou controla qualquer aparelho da conta (Spotify Connect):
+  seletor de aparelhos, aleatório, repetir, curtir, volume remoto, controles na tela de bloqueio.
+- Fila do app entregue à fila nativa do Spotify 20s antes do fim (troca sem pausa), "Tocar tudo", reordenar.
+- Biblioteca: tocadas recentemente e suas playlists. Busca de músicas, álbuns e playlists.
+- Apps em *modo de desenvolvimento* do Spotify aceitam poucos usuários: cadastre o e-mail de cada um em
+  **User Management** no painel do app no Spotify.
+
+## Letras
+
+- Sincronizadas (LRCLib), reescaladas quando a versão tem outra duração (remaster/ao vivo).
+- Só texto (Genius/LRCLib): sincronia estimada por sílabas. Toque na linha que está sendo cantada para calibrar;
+  `−0,5s`/`+0,5s` corrigem atrasos. O ajuste fica salvo por música.
 
 ## Rodar localmente / Docker
 
@@ -80,4 +99,5 @@ docker compose up -d --build   # banco persistido no volume zenspace-data
 - `POST /api/auth/google` — recebe o login do botão do Google; `POST /api/auth/logout` — sai
 - `GET|PUT /api/me/space` — dados da conta logada (todos os aparelhos)
 - `GET|PUT /api/space/:id` — dados do aparelho quando não há login
-- `GET /api/lyrics/fallback?artist=&track=` — letras do Genius (cacheadas no SQLite)
+- `GET /api/lyrics?artist=&track=&album=&duration=` — letras: LRCLib exato → LRCLib busca → Genius descobre o nome
+  oficial e o LRCLib é consultado de novo → texto do LRCLib/Genius (o app estima a sincronia). Cache no SQLite e na CDN
