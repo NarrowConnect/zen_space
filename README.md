@@ -83,4 +83,5 @@ docker compose up -d --build   # banco persistido no volume zenspace-data
 - `POST /api/auth/google` — recebe o login do botão do Google; `POST /api/auth/logout` — sai
 - `GET|PUT /api/me/space` — dados da conta logada (todos os aparelhos)
 - `GET|PUT /api/space/:id` — dados do aparelho quando não há login
-- `GET /api/lyrics/fallback?artist=&track=` — letras do Genius (cacheadas no SQLite)
+- `GET /api/lyrics?artist=&track=&album=&duration=` — letras em cascata: LRCLib exato → LRCLib busca → Genius,
+  com cache no SQLite (inclusive "sem letra") e na CDN da Vercel

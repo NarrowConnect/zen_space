@@ -1814,6 +1814,24 @@
             transform: scale(1.05);
         }
 
+        /* Letra sem tempo: texto corrido, rolável, começando do topo */
+        .spotify-lyrics-content.plain {
+            justify-content: flex-start;
+            gap: 0;
+        }
+        .spotify-lyric-line.plain-line {
+            min-height: 0;
+            padding: 0.2rem 0.5rem;
+            opacity: 0.85;
+        }
+        .spotify-lyrics-note {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-align: center;
+            opacity: 0.7;
+            padding-bottom: 0.5rem;
+        }
+
         .spotify-lyrics-empty {
             padding: 3rem 1rem;
             text-align: center;
@@ -3378,6 +3396,7 @@
 
         function updateProgressUI(current, total) {
             spotifyCurrentTime = current;
+            if (typeof anchorPlayback === 'function') anchorPlayback(current);
             spotifyTotalTime = total;
             spotifyCurrentTimeLabel.textContent = formatTime(current);
             spotifyTotalTimeLabel.textContent = formatTime(total);
@@ -3414,14 +3433,21 @@
         let activeSpotifyDevice = null;
         let spotifyQueue = safeJSON(safeStorage.getItem('spotify-queue'), []);
         if (!Array.isArray(spotifyQueue)) spotifyQueue = [];
-        let spotifyLyricsCache = safeJSON(safeStorage.getItem('spotify-lyrics-cache'), {});
+        // Cache local de letras (v2): { chave: { synced, lines, source, updatedAt } | { notFound, updatedAt } }
+        const LYRICS_CACHE_KEY = 'zen-lyrics-cache-v2';
+        const SPOTIFY_LYRICS_CACHE_LIMIT = 80;
+        const LYRICS_NOT_FOUND_TTL_MS = 6 * 60 * 60 * 1000; // músicas sem letra: tenta de novo após 6h
+        safeStorage.removeItem('spotify-lyrics-cache'); // formato antigo (tempo "inventado" no Genius)
+        let spotifyLyricsCache = safeJSON(safeStorage.getItem(LYRICS_CACHE_KEY), {});
         if (!spotifyLyricsCache || typeof spotifyLyricsCache !== 'object' || Array.isArray(spotifyLyricsCache)) spotifyLyricsCache = {};
-        const SPOTIFY_LYRICS_CACHE_LIMIT = 60;
         const spotifyFallbackImage = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36"><rect width="100%" height="100%" fill="%23222"/></svg>';
 
         // Variáveis para Letras Sincronizadas
         let currentLyrics = []; // Array de {time: ms, text: string}
+        let currentLyricsSynced = true; // false = letra sem tempo (mostra o texto inteiro, sem destaque)
         let currentLyricsIndex = -1;
+        let lyricsRequestSeq = 0; // descarta respostas de músicas que já passaram
+        const lyricsInFlight = new Map(); // evita buscar a mesma música duas vezes ao mesmo tempo
         let lyricsUpdateInterval = null;
         let currentTrackIdentifier = ''; // Para evitar múltiplas buscas da mesma música
         let currentTrackUri = '';
@@ -3479,8 +3505,15 @@
             return lines.sort((first, second) => first.time - second.time);
         }
 
+        function normalizeLyricsKeyPart(value) {
+            return String(value || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+                .replace(/\s+-\s+.*(remaster|version|versão|live|ao vivo|edit|mono|stereo|deluxe).*$/i, '')
+                .replace(/\s*[([](feat|ft|with)\.?[^)\]]*[)\]]/gi, '')
+                .replace(/[^a-z0-9]+/g, ' ').trim();
+        }
+
         function getLyricsCacheKey(artist, track) {
-            return `${artist}|||${track}`.toLowerCase();
+            return `${normalizeLyricsKeyPart(artist)}|${normalizeLyricsKeyPart(track)}`;
         }
 
         function persistLyricsCache() {
@@ -3491,127 +3524,207 @@
                     .slice(SPOTIFY_LYRICS_CACHE_LIMIT)
                     .forEach(key => delete spotifyLyricsCache[key]);
             }
-            safeStorage.setItem('spotify-lyrics-cache', JSON.stringify(spotifyLyricsCache));
+            safeStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify(spotifyLyricsCache));
         }
 
-        function cacheLyrics(artist, track, lyrics, source) {
-            spotifyLyricsCache[getLyricsCacheKey(artist, track)] = {
-                lyrics,
-                source,
-                updatedAt: Date.now()
-            };
+        function cacheLyricsResult(key, result) {
+            spotifyLyricsCache[key] = { ...result, updatedAt: Date.now() };
             persistLyricsCache();
         }
 
-        function readCachedLyrics(artist, track) {
-            return spotifyLyricsCache[getLyricsCacheKey(artist, track)] || null;
+        function readCachedLyrics(key) {
+            const entry = spotifyLyricsCache[key];
+            if (!entry) return null;
+            if (entry.notFound) {
+                return Date.now() - (entry.updatedAt || 0) < LYRICS_NOT_FOUND_TTL_MS ? entry : null;
+            }
+            return Array.isArray(entry.lines) && entry.lines.length ? entry : null;
         }
 
         function resetLyricsState(message = 'Toque uma música para ver as letras sincronizadas') {
+            lyricsRequestSeq++;
             currentLyrics = [];
             currentLyricsIndex = -1;
             currentTrackIdentifier = '';
+            spotifyLyricsContent.classList.remove('plain');
             spotifyLyricsContent.innerHTML = `<div class="todo-empty" style="padding: 2rem 0;">${message}</div>`;
         }
 
-        // Buscar letras na LRCLib
-        async function fetchLyricsFromLRCLib(artist, track) {
-            try {
-                const response = await fetchWithTimeout(`https://lrclib.net/api/search?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`);
-                
-                if (!response.ok) return null;
-                
-                const data = await response.json();
-                if (!Array.isArray(data) || data.length === 0) return null;
-                
-                const match = data[0];
-                if (!match.syncedLyrics) return null;
-                
-                return parseLRC(match.syncedLyrics);
-            } catch (error) {
-                console.error('Erro ao buscar letras LRCLib:', error);
-                return null;
-            }
+        function plainTextToLines(text) {
+            return String(text || '').split('\n')
+                .map(line => line.trim())
+                .filter(Boolean)
+                .map(text => ({ time: 0, text }));
         }
 
-        // Buscar letras por proxy backend com fallback para Genius
-        async function fetchLyricsFromGenius(artist, track) {
-            try {
-                const response = await fetchWithTimeout(`/api/lyrics/fallback?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`);
-                
-                if (!response.ok) return null;
-                
-                const data = await response.json();
-                if (!data.lyrics) return null;
-                
-                const lines = data.lyrics.split('\n')
-                    .filter(l => l.trim().length > 0)
-                    .map(l => ({ time: 0, text: l.trim() }));
+        // Converte a resposta das fontes no formato usado pela tela
+        function toLyricsResult(payload) {
+            if (!payload || payload.found === false) return { notFound: true };
+            if (payload.synced) {
+                const lines = parseLRC(payload.lyrics || '');
+                if (lines.length) return { synced: true, lines, source: payload.source || 'lrclib' };
+            }
+            const lines = plainTextToLines(String(payload.lyrics || '').replace(/\[\d{2}:\d{2}(?:\.\d{2,3})?\]/g, ''));
+            return lines.length ? { synced: false, lines, source: payload.source || 'lrclib' } : { notFound: true };
+        }
 
-                if (!lines.length) {
-                    return null;
+        // Plano B se o servidor estiver fora: consulta o LRCLib direto do navegador
+        async function fetchLyricsDirectFromLRCLib({ artist, track, album, durationMs }) {
+            const params = new URLSearchParams({ artist_name: artist, track_name: track });
+            if (durationMs) {
+                const getParams = new URLSearchParams(params);
+                getParams.set('duration', String(Math.round(durationMs / 1000)));
+                if (album) getParams.set('album_name', album);
+                const exact = await fetchWithTimeout(`https://lrclib.net/api/get?${getParams}`, {}, 6000).catch(() => null);
+                if (exact?.ok) {
+                    const item = await exact.json();
+                    if (item?.syncedLyrics || item?.plainLyrics) {
+                        return { found: true, synced: Boolean(item.syncedLyrics), lyrics: item.syncedLyrics || item.plainLyrics, source: 'lrclib' };
+                    }
                 }
-                
-                const approximateDuration = spotifyTotalTime || 240000;
-                const timePerLine = approximateDuration / lines.length;
-                
-                return lines.map((line, index) => ({
-                    time: index * timePerLine,
-                    text: line.text
-                }));
+            }
+            const response = await fetchWithTimeout(`https://lrclib.net/api/search?${params}`, {}, 6000);
+            if (!response.ok) throw new Error(`lrclib ${response.status}`);
+            const results = await response.json();
+            if (!Array.isArray(results)) return { found: false };
+            const withLyrics = results.filter(item => item.syncedLyrics || item.plainLyrics);
+            const best = withLyrics
+                .map(item => ({ item, diff: durationMs && item.duration ? Math.abs(item.duration * 1000 - durationMs) : 0 }))
+                .sort((a, b) => (Boolean(b.item.syncedLyrics) - Boolean(a.item.syncedLyrics)) || a.diff - b.diff)[0]?.item;
+            if (!best) return { found: false };
+            return { found: true, synced: Boolean(best.syncedLyrics), lyrics: best.syncedLyrics || best.plainLyrics, source: 'lrclib' };
+        }
+
+        async function requestLyrics(query) {
+            const params = new URLSearchParams({ artist: query.artist, track: query.track });
+            if (query.album) params.set('album', query.album);
+            if (query.durationMs) params.set('duration', String(Math.round(query.durationMs)));
+            try {
+                const response = await fetchWithTimeout(`/api/lyrics?${params}`, {}, 15000);
+                if (!response.ok) throw new Error(`api ${response.status}`);
+                const payload = await response.json();
+                // found:false sem cache pode ter sido falha temporária do servidor: tenta o LRCLib direto
+                if (payload.found === false && response.headers.get('Cache-Control') === 'no-store') {
+                    return { result: toLyricsResult(await fetchLyricsDirectFromLRCLib(query)), cacheable: true };
+                }
+                return { result: toLyricsResult(payload), cacheable: true };
             } catch (error) {
-                console.error('Erro ao buscar letras Genius:', error);
-                return null;
+                try {
+                    return { result: toLyricsResult(await fetchLyricsDirectFromLRCLib(query)), cacheable: true };
+                } catch (_) {
+                    return { result: { notFound: true }, cacheable: false }; // offline: não marca como "sem letra"
+                }
             }
         }
 
-        // Buscar letras (LRCLib → Genius → Não disponível)
-        async function fetchAndDisplayLyrics(artist, track, trackUri) {
-            const identifier = `${artist}|${track}`;
-            
-            if (identifier === currentTrackIdentifier && currentLyrics.length > 0) {
-                return;
-            }
+        function lyricsQueryFromTrack(track) {
+            return {
+                artist: track?.artists?.[0]?.name || '',
+                track: track?.name || '',
+                album: track?.album?.name || '',
+                durationMs: track?.duration_ms || 0
+            };
+        }
 
-            currentTrackUri = trackUri || '';
-            
+        /** Busca (com cache e sem duplicar pedidos) e devolve { synced, lines } ou { notFound }. */
+        function loadLyrics(query) {
+            const key = getLyricsCacheKey(query.artist, query.track);
+            const cached = readCachedLyrics(key);
+            if (cached) return Promise.resolve(cached);
+            if (lyricsInFlight.has(key)) return lyricsInFlight.get(key);
+
+            const promise = requestLyrics(query)
+                .then(({ result, cacheable }) => {
+                    if (cacheable) cacheLyricsResult(key, result);
+                    return result;
+                })
+                .finally(() => lyricsInFlight.delete(key));
+            lyricsInFlight.set(key, promise);
+            return promise;
+        }
+
+        // Baixa a letra da próxima música da fila para ela aparecer na hora
+        function prefetchNextLyrics() {
+            const next = spotifyQueue[0];
+            if (!next?.name || !next?.artists?.length) return;
+            const query = lyricsQueryFromTrack(next);
+            const idle = window.requestIdleCallback || (fn => setTimeout(fn, 1500));
+            idle(() => loadLyrics(query).catch(() => {}));
+        }
+
+        // Buscar letras: cache local → servidor (LRCLib → Genius, cache compartilhado) → LRCLib direto
+        async function fetchAndDisplayLyrics(track) {
+            const query = lyricsQueryFromTrack(track);
+            if (!query.artist || !query.track) return;
+            const identifier = getLyricsCacheKey(query.artist, query.track);
+
+            // O polling chama isto a cada 5s: se já é a música atual (com ou sem letra), não faz nada
+            if (identifier === currentTrackIdentifier) return;
+
             currentTrackIdentifier = identifier;
-            spotifyLyricsContent.innerHTML = '<div class="todo-empty" style="padding: 2rem 0;">Carregando letras...</div>';
-
-            const cached = readCachedLyrics(artist, track);
-            if (cached?.lyrics?.length) {
-                currentLyrics = cached.lyrics;
-                currentLyricsIndex = -1;
-                updateLyricsDisplay(spotifyCurrentTime);
-                return;
-            }
-            
-            let lyrics = await fetchLyricsFromLRCLib(artist, track);
-            let source = 'lrclib';
-            
-            if (!lyrics) {
-                lyrics = await fetchLyricsFromGenius(artist, track);
-                source = 'genius';
-            }
-            
-            if (!lyrics || lyrics.length === 0) {
-                resetLyricsState('Letras não disponíveis para esta música');
-                return;
-            }
-            
-            currentLyrics = lyrics;
+            const requestId = ++lyricsRequestSeq;
+            currentLyrics = [];
             currentLyricsIndex = -1;
-            cacheLyrics(artist, track, lyrics, source);
-            updateLyricsDisplay(spotifyCurrentTime);
+
+            const cached = readCachedLyrics(identifier);
+            if (!cached) {
+                spotifyLyricsContent.classList.remove('plain');
+                spotifyLyricsContent.innerHTML = '<div class="todo-empty" style="padding: 2rem 0;">Carregando letras...</div>';
+            }
+
+            let result;
+            try {
+                result = cached || await loadLyrics(query);
+            } catch (_) {
+                result = { notFound: true };
+            }
+
+            if (requestId !== lyricsRequestSeq) return; // a música mudou enquanto buscava
+
+            if (!result || result.notFound) {
+                spotifyLyricsContent.classList.remove('plain');
+                spotifyLyricsContent.innerHTML = '<div class="todo-empty" style="padding: 2rem 0;">Letras não disponíveis para esta música</div>';
+                prefetchNextLyrics();
+                return;
+            }
+
+            currentLyrics = result.lines;
+            currentLyricsSynced = result.synced !== false;
+            currentLyricsIndex = -1;
+
+            if (currentLyricsSynced) {
+                spotifyLyricsContent.classList.remove('plain');
+                updateLyricsDisplay(getPlaybackPositionMs());
+            } else {
+                renderPlainLyrics(result.source);
+            }
+            prefetchNextLyrics();
+        }
+
+        function renderPlainLyrics(source) {
+            spotifyLyricsContent.classList.add('plain');
+            const fragment = document.createDocumentFragment();
+            const note = document.createElement('div');
+            note.className = 'spotify-lyrics-note';
+            note.textContent = `Letra sem sincronização${source === 'genius' ? ' · Genius' : ''}`;
+            fragment.appendChild(note);
+            currentLyrics.forEach(line => {
+                const lineEl = document.createElement('div');
+                lineEl.className = 'spotify-lyric-line plain-line';
+                lineEl.textContent = line.text;
+                fragment.appendChild(lineEl);
+            });
+            spotifyLyricsContent.replaceChildren(fragment);
+            spotifyLyricsContent.scrollTop = 0;
         }
 
         function renderLyricsWindow(activeIndex) {
-            spotifyLyricsContent.innerHTML = '';
-
             if (!currentLyrics.length) {
+                spotifyLyricsContent.innerHTML = '';
                 return;
             }
 
+            const fragment = document.createDocumentFragment();
             const safeIndex = activeIndex < 0 ? 0 : activeIndex;
             const start = Math.max(0, safeIndex - 2);
             const end = Math.min(currentLyrics.length - 1, safeIndex + 2);
@@ -3622,43 +3735,60 @@
                 lineEl.className = `spotify-lyric-line${isActive ? ' active' : ''}`;
                 lineEl.dataset.index = visibleIndex;
                 lineEl.textContent = currentLyrics[visibleIndex].text;
-                spotifyLyricsContent.appendChild(lineEl);
+                fragment.appendChild(lineEl);
             }
 
-            while (spotifyLyricsContent.children.length < 5) {
-                const filler = document.createElement('div');
-                filler.className = 'spotify-lyric-line ghost';
-                filler.textContent = '.';
-                spotifyLyricsContent.appendChild(filler);
+            for (let filler = end - start + 1; filler < 5; filler++) {
+                const ghost = document.createElement('div');
+                ghost.className = 'spotify-lyric-line ghost';
+                ghost.textContent = '.';
+                fragment.appendChild(ghost);
             }
+            spotifyLyricsContent.replaceChildren(fragment);
+        }
+
+        // Busca binária: última linha cujo tempo já passou
+        function findLyricIndex(timeMs) {
+            let low = 0;
+            let high = currentLyrics.length - 1;
+            let found = -1;
+            while (low <= high) {
+                const mid = (low + high) >> 1;
+                if (currentLyrics[mid].time <= timeMs) { found = mid; low = mid + 1; } else { high = mid - 1; }
+            }
+            return found;
         }
 
         function updateLyricsDisplay(currentTimeMs) {
-            if (currentLyrics.length === 0) return;
-            
-            let newIndex = -1;
-            for (let i = 0; i < currentLyrics.length; i++) {
-                if (currentLyrics[i].time <= currentTimeMs) {
-                    newIndex = i;
-                } else {
-                    break;
-                }
-            }
+            if (currentLyrics.length === 0 || !currentLyricsSynced) return;
 
+            const newIndex = findLyricIndex(currentTimeMs);
             const hasRenderedWindow = spotifyLyricsContent.querySelector('.spotify-lyric-line');
             if (newIndex !== currentLyricsIndex || !hasRenderedWindow) {
                 currentLyricsIndex = newIndex;
                 renderLyricsWindow(newIndex);
-                spotifyLyricsContent.scrollTo({ top: 0, behavior: 'smooth' });
             }
+        }
+
+        // Posição real da música: último valor do Spotify + tempo que passou desde então (relógio do sistema),
+        // assim a letra não atrasa quando a aba fica em segundo plano.
+        let playbackAnchor = { positionMs: 0, at: performance.now() };
+        function anchorPlayback(positionMs) {
+            playbackAnchor = { positionMs, at: performance.now() };
+        }
+        function getPlaybackPositionMs() {
+            if (!isSpotifyPlaying || isSeekingSpotify) return spotifyCurrentTime;
+            const estimated = playbackAnchor.positionMs + (performance.now() - playbackAnchor.at);
+            return spotifyTotalTime > 0 ? Math.min(estimated, spotifyTotalTime) : estimated;
         }
 
         function setupLyricsSync() {
             if (lyricsUpdateInterval) clearInterval(lyricsUpdateInterval);
             
             lyricsUpdateInterval = setInterval(() => {
-                updateLyricsDisplay(spotifyCurrentTime);
-            }, 120);
+                if (document.hidden) return; // ninguém está vendo: economiza bateria
+                updateLyricsDisplay(getPlaybackPositionMs());
+            }, 150);
         }
 
         function stopLyricsSync() {
@@ -4200,8 +4330,7 @@
                 queueAdvanceLocked = false;
             }
 
-            const artist = track?.artists?.[0]?.name || 'Unknown';
-            fetchAndDisplayLyrics(artist, track.name, nextTrackUri);
+            fetchAndDisplayLyrics(track);
             updateLyricsDisplay(progressMs);
             setupLyricsSync();
         }
@@ -4340,10 +4469,8 @@
                 if (spotifyProgressInterval) clearInterval(spotifyProgressInterval);
                 spotifyProgressInterval = setInterval(() => {
                     if (isSpotifyPlaying && spotifyTotalTime > 0) {
-                        spotifyCurrentTime += 200; // Incrementa 200ms
-                        if (spotifyCurrentTime >= spotifyTotalTime) {
-                            spotifyCurrentTime = spotifyTotalTime;
-                        }
+                        // Usa o relógio real (não "+200ms"), que não atrasa com a aba em segundo plano
+                        spotifyCurrentTime = getPlaybackPositionMs();
                         if (!isSeekingSpotify) {
                             spotifyCurrentTimeLabel.textContent = formatTime(spotifyCurrentTime);
                             spotifyProgressSlider.value = (spotifyCurrentTime / spotifyTotalTime) * 100;
@@ -4397,8 +4524,8 @@
             }
 
             // Buscar letras da música
-            const artist = track.artists[0]?.name || 'Unknown';
-            fetchAndDisplayLyrics(artist, track.name, track.uri);
+            currentTrackUri = track.uri || currentTrackUri;
+            fetchAndDisplayLyrics(track);
             setupLyricsSync();
 
             isSpotifyPlaying = data.is_playing;
