@@ -3322,7 +3322,17 @@
            ========================================================================= */
         const spotifyCard = document.getElementById('spotify-card');
 
-        const SPOTIFY_CLIENT_ID = '73ca7ee0911c424e8b67ae6704d1c879';
+        // Client ID do Spotify: vem da variável SPOTIFY_CLIENT_ID do servidor (via /api/auth/me).
+        // Fica guardado no aparelho para funcionar offline; sem variável, usa o padrão abaixo.
+        const SPOTIFY_DEFAULT_CLIENT_ID = '73ca7ee0911c424e8b67ae6704d1c879';
+        let SPOTIFY_CLIENT_ID = safeStorage.getItem('zen-spotify-client-id') || SPOTIFY_DEFAULT_CLIENT_ID;
+        document.addEventListener('zen:auth', (event) => {
+            const configured = event.detail?.spotifyClientId;
+            if (configured && configured !== SPOTIFY_CLIENT_ID) {
+                SPOTIFY_CLIENT_ID = configured;
+                safeStorage.setItem('zen-spotify-client-id', configured);
+            }
+        });
         // Usa automaticamente o domínio onde o app está rodando (cadastre-o no painel do Spotify)
         const SPOTIFY_REDIRECT_URI = `${location.origin}/`;
         const spotifyDisconnectedArea = document.getElementById('spotify-disconnected-area');
@@ -3701,7 +3711,7 @@
             const code = urlParams.get('code');
 
             if (code) {
-                const clientId = SPOTIFY_CLIENT_ID;
+                const clientId = safeStorage.getItem('spotify_client_id') || SPOTIFY_CLIENT_ID; // mesmo ID que iniciou o login
                 const redirectUri = SPOTIFY_REDIRECT_URI;
                 const codeVerifier = safeStorage.getItem('spotify_code_verifier');
 
@@ -3826,7 +3836,7 @@
         // Renovar Token expirado usando o Refresh Token
         async function refreshSpotifyToken() {
             const refreshToken = safeStorage.getItem('spotify_refresh_token');
-            const clientId = SPOTIFY_CLIENT_ID;
+            const clientId = safeStorage.getItem('spotify_client_id') || SPOTIFY_CLIENT_ID; // mesmo ID que iniciou o login
 
             if (!refreshToken || !clientId) {
                 safeStorage.removeItem('spotify_token');

@@ -22,9 +22,12 @@ na Vercel, cadastre em *Settings → Environment Variables*.
 | Variável | Obrigatória | Para quê |
 | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | para o login | ID do cliente OAuth do Google |
+| `SPOTIFY_CLIENT_ID` | não | Client ID do app no Spotify (sem ele usa o padrão do código) |
 | `SESSION_SECRET` | em produção | Assina o cookie de sessão (`openssl rand -hex 32`) |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | recomendado na Vercel | SQLite persistente |
 | `SQLITE_PATH`, `PORT` | não | Só local/Docker |
+
+Nenhum *client secret* é necessário: o Google é validado com as chaves públicas do Google e o Spotify usa PKCE.
 
 ## Login com Google
 
