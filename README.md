@@ -9,8 +9,33 @@ Nada para configurar: é só abrir o site.
 - **Android / Chrome / Edge:** aparece o botão **Instalar**.
 - **iPhone / iPad (Safari):** Compartilhar → **Adicionar à Tela de Início** (o app mostra essa dica).
 - Funciona **offline** depois da primeira visita.
-- Tarefas, notas, nome, tema e fila do Spotify ficam salvos no aparelho e são copiados automaticamente para o servidor.
+- **Login com Google (opcional):** com login, tarefas, notas, nome, tema e fila do Spotify ficam iguais em
+  todos os aparelhos. Sem login, tudo funciona e os dados ficam salvos só naquele aparelho.
+- Os dados ficam salvos no aparelho e são copiados automaticamente para o servidor.
   Se o servidor estiver fora do ar, o app continua funcionando normalmente só com os dados locais.
+
+## Variáveis de ambiente
+
+Veja [`.env.example`](.env.example). Localmente, copie para `.env` (o `npm start` lê sozinho);
+na Vercel, cadastre em *Settings → Environment Variables*.
+
+| Variável | Obrigatória | Para quê |
+| --- | --- | --- |
+| `GOOGLE_CLIENT_ID` | para o login | ID do cliente OAuth do Google |
+| `SESSION_SECRET` | em produção | Assina o cookie de sessão (`openssl rand -hex 32`) |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | recomendado na Vercel | SQLite persistente |
+| `SQLITE_PATH`, `PORT` | não | Só local/Docker |
+
+## Login com Google
+
+No [Google Cloud Console](https://console.cloud.google.com/apis/credentials) → *Criar credenciais* →
+*ID do cliente OAuth* → *Aplicativo da Web*:
+
+- **Origens JavaScript autorizadas:** `https://zen.narrowconnect.com.br`, `https://www.zen.narrowconnect.com.br`
+- **URIs de redirecionamento autorizados:** `https://zen.narrowconnect.com.br/api/auth/google`,
+  `https://www.zen.narrowconnect.com.br/api/auth/google`
+
+Para testar localmente, acrescente `http://localhost:8080` e `http://localhost:8080/api/auth/google`.
 
 ## Deploy na Vercel
 
@@ -45,10 +70,14 @@ docker compose up -d --build   # banco persistido no volume zenspace-data
 | `api/index.js` | Função serverless da Vercel (todas as rotas `/api/*`) |
 | `lib/app.js` | App Express: sync de dados, letras via Genius com cache |
 | `lib/db.js` | SQLite via libSQL (arquivo local, `/tmp` ou Turso) |
+| `lib/auth.js` | Login Google: valida o token e cria a sessão em cookie |
 | `local-server.js` | Servidor para uso local e Docker |
 
 ## API
 
 - `GET /api/health` — status do servidor e do banco
-- `GET /api/space/:id` / `PUT /api/space/:id` — sincronização automática dos dados do app
+- `GET /api/auth/me` — usuário logado + client id público do Google
+- `POST /api/auth/google` — recebe o login do botão do Google; `POST /api/auth/logout` — sai
+- `GET|PUT /api/me/space` — dados da conta logada (todos os aparelhos)
+- `GET|PUT /api/space/:id` — dados do aparelho quando não há login
 - `GET /api/lyrics/fallback?artist=&track=` — letras do Genius (cacheadas no SQLite)

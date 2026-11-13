@@ -110,6 +110,72 @@
             transition: background 1.5s ease-in-out, color 0.5s ease;
         }
 
+        /* Conta Google */
+        .account-area {
+            display: flex;
+            align-items: center;
+            min-height: 40px;
+        }
+        .account-area[hidden], .account-user[hidden] { display: none; }
+        .google-signin-btn { min-height: 40px; display: flex; align-items: center; }
+        .account-user {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            padding: 0.35rem 0.4rem 0.35rem 0.35rem;
+            border-radius: 2rem;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        .account-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            object-fit: cover;
+            background: rgba(var(--accent-rgb), 0.25);
+        }
+        .account-info { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+        .account-name {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .account-sync { font-size: 0.7rem; color: var(--accent-secondary); }
+        .account-logout {
+            border: 1px solid var(--glass-border);
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 1rem;
+            padding: 0.35rem 0.75rem;
+            font: inherit;
+            font-size: 0.8rem;
+            cursor: pointer;
+            min-height: 32px;
+        }
+        .account-logout:hover { color: var(--text-primary); border-color: rgba(255, 255, 255, 0.2); }
+
+        .zen-toast {
+            position: fixed;
+            top: calc(16px + env(safe-area-inset-top, 0px));
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: calc(100vw - 32px);
+            padding: 10px 16px;
+            border-radius: 12px;
+            background: rgba(8, 20, 24, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            z-index: 10000;
+            box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.7);
+        }
+
         /* Banner de instalação do app (Android / iPhone / desktop) */
         .install-banner {
             position: fixed;
@@ -1787,7 +1853,21 @@
                 <button class="theme-btn" data-theme-choice="sunset" title="Tema Sunset"></button>
                 <button class="theme-btn" data-theme-choice="zen" title="Tema Zen"></button>
             </div>
+
+            <!-- Conta Google (aparece só se GOOGLE_CLIENT_ID estiver configurado no servidor) -->
+            <div class="account-area" id="account-area" hidden>
+                <div id="google-signin-btn" class="google-signin-btn"></div>
+                <div class="account-user" id="account-user" hidden>
+                    <img id="account-avatar" class="account-avatar" alt="" referrerpolicy="no-referrer">
+                    <div class="account-info">
+                        <span class="account-name" id="account-name"></span>
+                        <span class="account-sync">Sincronizado na nuvem</span>
+                    </div>
+                    <button type="button" class="account-logout" id="account-logout">Sair</button>
+                </div>
+            </div>
         </header>
+        <div class="zen-toast" id="zen-toast" role="status" aria-live="polite" hidden></div>
 
         <!-- Relógio & Saudação central -->
         <section class="clock-widget">
@@ -2329,9 +2409,16 @@
                 return data;
             }
 
+            var currentUser = null; // preenchido por checkAuth()
+            var ACCOUNT_KEY = 'zen-account-id';
+
+            function spaceUrl() {
+                return currentUser ? '/api/me/space' : '/api/space/' + encodeURIComponent(spaceId);
+            }
+
             function pushNow() {
                 if (syncDisabled) return Promise.resolve();
-                return fetchWithTimeout('/api/space/' + encodeURIComponent(spaceId), {
+                return fetchWithTimeout(spaceUrl(), {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ data: collectData(), updatedAt: meta.updatedAt }),
@@ -2350,7 +2437,7 @@
 
             function pull() {
                 if (syncDisabled) return;
-                fetchWithTimeout('/api/space/' + encodeURIComponent(spaceId), { cache: 'no-store' })
+                fetchWithTimeout(spaceUrl(), { cache: 'no-store', credentials: 'same-origin' })
                     .then(function (res) {
                         return res.ok ? res.json() : null;
                     })
@@ -2384,20 +2471,57 @@
                     .catch(function () { /* sem backend: modo somente local */ });
             }
 
+            // --- Conta Google: descobre quem está logado antes de sincronizar ---
+            function checkAuth() {
+                if (syncDisabled) return Promise.resolve({ user: null, googleClientId: null });
+                return fetchWithTimeout('/api/auth/me', { cache: 'no-store', credentials: 'same-origin' }, 6000)
+                    .then(function (res) { return res.ok ? res.json() : { user: null, googleClientId: null }; })
+                    .catch(function () { return { user: null, googleClientId: null }; });
+            }
+
+            function start() {
+                checkAuth().then(function (info) {
+                    currentUser = info.user || null;
+                    var accountId = currentUser ? currentUser.id : '';
+                    if ((rawGet(ACCOUNT_KEY) || '') !== accountId) {
+                        // Entrou numa conta neste aparelho: a conta manda (se tiver dados);
+                        // se a conta estiver vazia, os dados locais sobem para ela.
+                        rawSet(ACCOUNT_KEY, accountId);
+                        meta = { updatedAt: meta.updatedAt || 0, syncedAt: 0 };
+                        rawSet(META_KEY, JSON.stringify(meta));
+                        try { sessionStorage.removeItem('zen-sync-reloaded'); } catch (_) {}
+                    }
+                    pull();
+                    document.dispatchEvent(new CustomEvent('zen:auth', { detail: info }));
+                });
+            }
+
+            function logout() {
+                return fetchWithTimeout('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+                    .catch(function () {})
+                    .then(function () {
+                        // Limpa os dados da conta deste aparelho (continuam salvos na conta)
+                        SYNC_KEYS.concat([META_KEY, ACCOUNT_KEY]).forEach(rawRemove);
+                        try { if (window.google && google.accounts) google.accounts.id.disableAutoSelect(); } catch (_) {}
+                        location.replace(location.pathname);
+                    });
+            }
+
             window.ZenSync = {
                 spaceId: spaceId,
-                shareUrl: function () { return location.origin + location.pathname + '?space=' + spaceId; },
+                user: function () { return currentUser; },
                 push: pushNow,
-                pull: pull
+                pull: pull,
+                logout: logout
             };
 
             document.addEventListener('visibilitychange', function () {
                 if (document.visibilityState === 'hidden' && meta.updatedAt > (meta.syncedAt || 0)) pushNow();
             });
             if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', pull);
+                document.addEventListener('DOMContentLoaded', start);
             } else {
-                pull();
+                start();
             }
         })();
     </script>
@@ -4387,6 +4511,97 @@
         checkSpotifyCallback();
         updateSpotifyUI();
 
+    </script>
+
+    <script>
+        /* =========================================================================
+           LOGIN COM GOOGLE (opcional: sem login, os dados ficam no aparelho)
+           ========================================================================= */
+        (function () {
+            var area = document.getElementById('account-area');
+            var btnBox = document.getElementById('google-signin-btn');
+            var userBox = document.getElementById('account-user');
+            var toast = document.getElementById('zen-toast');
+
+            function showToast(message) {
+                if (!toast) return;
+                toast.textContent = message;
+                toast.hidden = false;
+                setTimeout(function () { toast.hidden = true; }, 4000);
+            }
+
+            // Resultado do login vem na URL (?login=ok|erro); limpamos para não ficar no endereço
+            try {
+                var params = new URLSearchParams(location.search);
+                var result = params.get('login');
+                if (result) {
+                    params.delete('login');
+                    var clean = location.pathname + (params.toString() ? '?' + params : '') + location.hash;
+                    history.replaceState(null, '', clean);
+                    if (result === 'erro') showToast('Não foi possível entrar com o Google. Tente novamente.');
+                }
+            } catch (_) {}
+
+            function renderUser(user) {
+                btnBox.hidden = true;
+                userBox.hidden = false;
+                document.getElementById('account-name').textContent = user.name || user.email || 'Conta Google';
+                var avatar = document.getElementById('account-avatar');
+                if (user.picture) avatar.src = user.picture; else avatar.hidden = true;
+                document.getElementById('account-logout').onclick = function () { ZenSync.logout(); };
+
+                // Usa o primeiro nome do Google na saudação, se o usuário ainda não personalizou
+                var nameEl = document.getElementById('editable-name');
+                var stored = safeStorage.getItem('zen-username');
+                if (user.name && nameEl && (!stored || stored === 'Otávio')) {
+                    var first = String(user.name).split(' ')[0];
+                    nameEl.textContent = first;
+                    safeStorage.setItem('zen-username', first);
+                }
+            }
+
+            function renderGoogleButton(clientId) {
+                var script = document.createElement('script');
+                script.src = 'https://accounts.google.com/gsi/client';
+                script.async = true;
+                script.defer = true;
+                script.onload = function () {
+                    try {
+                        google.accounts.id.initialize({
+                            client_id: clientId,
+                            ux_mode: 'redirect', // funciona igual no Android, iPhone (inclusive app instalado) e desktop
+                            login_uri: location.origin + '/api/auth/google',
+                            auto_select: false,
+                            itp_support: true
+                        });
+                        google.accounts.id.renderButton(btnBox, {
+                            type: 'standard',
+                            theme: 'filled_black',
+                            size: 'large',
+                            shape: 'pill',
+                            text: 'signin_with',
+                            locale: 'pt-BR'
+                        });
+                    } catch (error) {
+                        console.warn('[ZenSpace] botão do Google indisponível:', error);
+                        area.hidden = true;
+                    }
+                };
+                script.onerror = function () { area.hidden = true; }; // offline / bloqueado: segue sem login
+                document.head.appendChild(script);
+            }
+
+            document.addEventListener('zen:auth', function (event) {
+                var info = event.detail || {};
+                if (info.user) {
+                    area.hidden = false;
+                    renderUser(info.user);
+                } else if (info.googleClientId) {
+                    area.hidden = false;
+                    renderGoogleButton(info.googleClientId);
+                }
+            });
+        })();
     </script>
 
     <div class="install-banner" id="install-banner" role="dialog" aria-live="polite" hidden>
