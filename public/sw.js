@@ -2,7 +2,7 @@
    - Página (HTML): rede primeiro, cache como reserva (sempre pega a versão nova quando há internet).
    - Ícones/fontes/estáticos: cache primeiro, atualizando em segundo plano.
    - /api/* e APIs externas (Spotify, LRCLib): nunca são cacheados aqui. */
-const VERSION = 'zenspace-v3';
+const VERSION = 'zenspace-v4';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png'];
 const CACHEABLE_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 

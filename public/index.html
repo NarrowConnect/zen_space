@@ -2942,6 +2942,23 @@
             return pinkNoiseBuffer;
         }
 
+        /**
+         * Muda um volume suavemente a partir do valor ATUAL, cancelando rampas agendadas.
+         * (Sem isso, o fade-in de 1,5s agendado sobrescrevia o slider e o volume só mudava religando.)
+         */
+        function rampGain(param, value, seconds = 0.08) {
+            if (!audioCtx || !param) return;
+            const now = audioCtx.currentTime;
+            const target = Math.max(0, Math.min(1, Number(value) || 0));
+            if (typeof param.cancelAndHoldAtTime === 'function') {
+                param.cancelAndHoldAtTime(now); // mantém o valor exato do meio da rampa
+            } else {
+                param.cancelScheduledValues(now);
+                param.setValueAtTime(param.value, now);
+            }
+            param.linearRampToValueAtTime(target, now + seconds);
+        }
+
         function startSoundNode(type) {
             initAudio();
             if (audioCtx.state === 'suspended') {
@@ -3037,7 +3054,7 @@
             state.source.start(0);
 
             // Suave Fade-In (1.5 segundos)
-            state.gain.gain.linearRampToValueAtTime(state.volume, audioCtx.currentTime + 1.5);
+            rampGain(state.gain.gain, state.volume, 1.5);
         }
 
         function stopSoundNode(type) {
@@ -3050,7 +3067,7 @@
 
             // Suave Fade-Out (1.5 segundos)
             if (audioCtx && audioCtx.state !== 'suspended') {
-                currentGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1.5);
+                rampGain(currentGain.gain, 0, 1.5);
             }
 
             // Desassocia referências na hora para evitar múltiplos cliques conflituosos
@@ -3149,13 +3166,23 @@
 
         // Controladores de Volume dos Sliders
         document.querySelectorAll('.volume-control').forEach(slider => {
+            const type = slider.getAttribute('data-sound-vol');
+            const saved = parseFloat(safeStorage.getItem(`zen-sound-vol-${type}`));
+            if (soundState[type]) {
+                if (saved >= 0 && saved <= 1) slider.value = String(saved);
+                soundState[type].volume = parseFloat(slider.value) || 0; // o slider manda no volume inicial
+            }
             slider.addEventListener('input', (e) => {
                 const soundType = e.target.getAttribute('data-sound-vol');
-                const val = e.target.value;
-                soundState[soundType].volume = parseFloat(val);
+                const state = soundState[soundType];
+                if (!state) return;
+                state.volume = parseFloat(e.target.value) || 0;
+                safeStorage.setItem(`zen-sound-vol-${soundType}`, String(state.volume));
 
-                if (audioCtx && soundState[soundType].gain && soundState[soundType].active) {
-                    soundState[soundType].gain.gain.linearRampToValueAtTime(val, audioCtx.currentTime + 0.1);
+                // Atualiza na hora, inclusive durante o fade-in
+                if (audioCtx && state.gain && state.active) {
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                    rampGain(state.gain.gain, state.volume, 0.08);
                 }
             });
         });
